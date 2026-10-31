@@ -47,7 +47,17 @@ async def register_bot_menu_commands(client: TelegramClient) -> None:
 def create_bot_client() -> TelegramClient:
     """Creates and configures the Telethon client in Bot mode."""
     from core.crypto_patch import apply_crypto_patch
-    apply_crypto_patch()
+    crypto_status = apply_crypto_patch()
+    if crypto_status.get("accelerated"):
+        logger.info(
+            f"MTProto cryptographic acceleration active: {crypto_status.get('engine')} "
+            f"({crypto_status.get('speed_estimate')})"
+        )
+    else:
+        logger.warning(
+            f"MTProto cryptography unaccelerated ({crypto_status.get('engine')}). "
+            "Install cryptg or OpenSSL for high-speed transfers."
+        )
 
     session_name = "optimizer_bot_session"
 

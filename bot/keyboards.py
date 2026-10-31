@@ -30,11 +30,14 @@ def build_ai_session_menu(task_id: str) -> List[List[Button]]:
 
 
 def build_ai_deliver_menu(task_id: str) -> List[List[Button]]:
-    """Builds options after deliverable delivery: continue editing or done/exit."""
+    """Builds options after deliverable delivery: continue editing, save to downloads, or done/exit."""
     return [
         [
             Button.inline("Try Another Edit / Request", data=f"ai_manual:{task_id}".encode()),
             Button.inline("Done (Exit AI Mode)", data=f"main_menu:{task_id}".encode())
+        ],
+        [
+            Button.inline("Save Deliverable to Downloads", data=f"ai_promote:{task_id}".encode())
         ],
         [
             Button.inline("Exit AI Session", data=f"ai_exit:{task_id}".encode())
@@ -191,7 +194,7 @@ def build_files_list_menu(files: list, page: int = 0, page_size: int = 5) -> Lis
 
     for i in range(start_idx, end_idx):
         f = files[i]
-        type_tag = "[Orig]" if f["file_type"] == "original" else "[Opt]"
+        type_tag = "[Orig]" if f["file_type"] == "original" else ("[DL]" if f["file_type"] == "download" else "[Opt]")
         # Format size
         size_mb = f["size"] / (1024 * 1024)
         size_str = f"{size_mb:.1f}M" if size_mb >= 1 else f"{f['size'] // 1024}K"

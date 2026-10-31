@@ -32,6 +32,14 @@ class Settings:
     AI_DEBUG_DIR: Path = BASE_DIR / os.getenv("AI_DEBUG_DIR", "storage/debug-ai")
     DB_PATH: Path = BASE_DIR / os.getenv("DB_PATH", "database/optimizer.db")
 
+    # Logging Paths
+    LOG_DIR: Path = BASE_DIR / os.getenv("LOG_DIR", "logs")
+    SYSTEM_LOG_DIR: Path = LOG_DIR / "system"
+    AI_LOG_DIR: Path = LOG_DIR / "ai"
+    ERROR_LOG_DIR: Path = LOG_DIR / "errors"
+    LOG_MAX_BYTES: int = int(os.getenv("LOG_MAX_BYTES", str(5 * 1024 * 1024)))
+    LOG_BACKUP_COUNT: int = int(os.getenv("LOG_BACKUP_COUNT", "5"))
+
     # AI Configuration
     OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "").strip()
     OPENROUTER_MODEL: str = os.getenv("OPENROUTER_MODEL", "google/gemini-2.0-flash-exp:free").strip()
@@ -48,23 +56,28 @@ class Settings:
     AI_SESSION_IDLE_TIMEOUT: int = int(os.getenv("AI_SESSION_IDLE_TIMEOUT", "3600"))
 
     def ensure_directories(self) -> None:
-        """Create necessary directories if they don't exist."""
+        """Create necessary directories if they don't exist and clean up retired legacy directories."""
         self.DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
         self.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         self.AI_WORKPLACE_DIR.mkdir(parents=True, exist_ok=True)
-        self.AI_DEBUG_DIR.mkdir(parents=True, exist_ok=True)
         self.DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        self.SYSTEM_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        self.AI_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        self.ERROR_LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-        # Create convenience root symlink debug-ai -> storage/debug-ai if possible
-        root_debug = BASE_DIR / "debug-ai"
-        if not root_debug.exists():
+        # Retire legacy debug-ai root symlink and storage directory
+        legacy_symlink = BASE_DIR / "debug-ai"
+        if legacy_symlink.is_symlink() or legacy_symlink.is_file():
             try:
-                root_debug.symlink_to(self.AI_DEBUG_DIR, target_is_directory=True)
+                legacy_symlink.unlink(missing_ok=True)
             except Exception:
-                try:
-                    root_debug.mkdir(parents=True, exist_ok=True)
-                except Exception:
-                    pass
+                pass
+        elif legacy_symlink.is_dir():
+            shutil.rmtree(legacy_symlink, ignore_errors=True)
+
+        legacy_storage = BASE_DIR / "storage" / "debug-ai"
+        if legacy_storage.exists() and legacy_storage.is_dir():
+            shutil.rmtree(legacy_storage, ignore_errors=True)
 
     def get_ai_workplace(self, user_id: int, task_id: str) -> Path:
         """Get or create isolated sandbox directory for a specific AI task."""

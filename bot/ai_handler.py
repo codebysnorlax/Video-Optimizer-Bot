@@ -4,20 +4,29 @@ Manages interactive AI engineer chat sessions, quick prompts, and sandboxed exec
 """
 
 import os
+import shutil
 import time
 import asyncio
 import logging
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from telethon import events, Button
 from config.settings import settings
-from core.probe import format_bytes, format_duration, probe_media, format_before_after_analysis, clean_display_name
+from core.probe import (
+    format_bytes,
+    format_duration,
+    probe_media,
+    format_before_after_analysis,
+    clean_display_name,
+    MediaMetadata
+)
 from core.hardware import current_hardware
 from core.terminal import term_log
 from core.engine import run_ffmpeg_with_progress
 from core.fast_transfer import fast_upload
 from core.optimizer import VideoOptimizer
 from core.ai.agent import VideoAIAgent
+from core.ai.tools import SafeToolExecutor
 from bot.keyboards import (
     build_main_menu,
     build_ai_session_menu,
@@ -230,14 +239,35 @@ async def execute_ai_query(user_prompt: str, task_ctx, status_msg, client) -> No
         except Exception as rec_err:
             logger.debug(f"record_task_start for AI Manual: {rec_err}")
 
-        # Display initial thinking status
+        # Display initial thinking status and start dynamic status ticker
+        status_phrases = [
+            "**AI Video Engineer is thinking...**",
+            "**AI Video Engineer:** Working on your request...",
+            "**AI Video Engineer:** Analyzing video parameters...",
+            "**AI Video Engineer:** Formulating best plan...",
+            "**AI Video Engineer:** Almost there..."
+        ]
+
         try:
-            await status_msg.edit(
-                f"**AI Video Engineer is analyzing your request...**\n\n_\"{user_prompt[:80]}...\"_",
-                buttons=None
-            )
+            await status_msg.edit(status_phrases[0], buttons=None)
         except Exception:
             pass
+
+        ticker_task: Optional[asyncio.Task] = None
+
+        async def status_ticker():
+            idx = 0
+            while True:
+                await asyncio.sleep(2.5)
+                idx = (idx + 1) % len(status_phrases)
+                try:
+                    await status_msg.edit(status_phrases[idx])
+                except asyncio.CancelledError:
+                    break
+                except Exception:
+                    pass
+
+        ticker_task = asyncio.create_task(status_ticker())
 
         # Ensure agent is initialized with user's model
         active_model = await get_user_ai_model(user_id)
@@ -265,6 +295,8 @@ async def execute_ai_query(user_prompt: str, task_ctx, status_msg, client) -> No
         updater = ThrottledMessageUpdater(status_msg, interval=settings.PROGRESS_UPDATE_INTERVAL)
 
         async def transcode_progress(percent: float, speed: str, eta: int, fps: float, step_label: Optional[str] = None, stalled: bool = False, **kwargs):
+            if ticker_task and not ticker_task.done():
+                ticker_task.cancel()
             task_ctx.touch()
             if task_ctx.is_cancelled:
                 if task_ctx.current_process:
@@ -299,11 +331,16 @@ async def execute_ai_query(user_prompt: str, task_ctx, status_msg, client) -> No
             is_initial = (percent == 0.0 or speed in ("init", "starting"))
             await updater.update(text, force=is_initial, buttons=build_task_progress_menu(task_id))
 
+        def on_started(p):
+            if ticker_task and not ticker_task.done():
+                ticker_task.cancel()
+            setattr(task_ctx, "current_process", p)
+
         try:
             result = await task_ctx.ai_agent.process_message(
                 user_prompt,
                 progress_callback=transcode_progress,
-                on_process_started=lambda p: setattr(task_ctx, "current_process", p)
+                on_process_started=on_started
             )
         except Exception as e:
             logger.error(f"Error during AI reasoning turn: {e}", exc_info=True)
@@ -312,6 +349,13 @@ async def execute_ai_query(user_prompt: str, task_ctx, status_msg, client) -> No
                 buttons=build_ai_session_menu(task_id)
             )
             return
+        finally:
+            if ticker_task and not ticker_task.done():
+                ticker_task.cancel()
+                try:
+                    await ticker_task
+                except asyncio.CancelledError:
+                    pass
 
         # 1. Error Response
         if result.get("status") == "error":
@@ -700,6 +744,93 @@ async def deliver_ai_results(
         task_ctx.touch()
 
 
-async def deliver_ai_output(task_ctx, plan_title: str, out_path: Path, status_msg, client) -> None:
-    """Compatibility wrapper uploading a single AI output."""
-    await deliver_ai_results(task_ctx, plan_title, [out_path], status_msg, client)
+async def promote_ai_deliverable(
+    user_id: int,
+    task_id: str,
+    file_path: Path,
+    custom_name: Optional[str] = None
+) -> Path:
+    """
+    Promotes a user-approved AI result from temporary AI workspace to storage/downloads/.
+    Registers the promoted file into database file_cache with storage_type = 'download'.
+    Ensures file is preserved from subsequent workspace pruning.
+    """
+    settings.DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    src = Path(file_path)
+    if not src.exists():
+        raise FileNotFoundError(f"Source deliverable not found: {src}")
+
+    target_name = custom_name or src.name
+    dest = settings.DOWNLOAD_DIR / target_name
+
+    # Handle collision if file already exists in downloads
+    if dest.exists() and dest.resolve() != src.resolve():
+        stem = src.stem
+        suffix = src.suffix
+        dest = settings.DOWNLOAD_DIR / f"{stem}_{task_id[:6]}{suffix}"
+
+    # Copy deliverable to storage/downloads/
+    if src.resolve() != dest.resolve():
+        shutil.copy2(src, dest)
+
+    # Register in SQLite file_cache with storage_type = 'download'
+    promoted_task_id = f"ai_dl_{task_id}_{dest.stem}"
+    await register_file_cache(
+        task_id=promoted_task_id,
+        user_id=user_id,
+        input_path="",
+        output_path=str(dest),
+        storage_type="download"
+    )
+
+    system_logger = logging.getLogger("system")
+    system_logger.info(
+        f"Promoted AI deliverable {src.name} -> {dest} for user {user_id} (task {task_id}, type 'download')"
+    )
+
+    return dest
+
+
+async def promote_all_session_deliverables(task_ctx) -> List[Path]:
+    """Promotes all deliverables generated during the active AI session to downloads."""
+    promoted: List[Path] = []
+    assets = task_ctx.get_assets() if hasattr(task_ctx, "get_assets") else (task_ctx.assets or {})
+    for aid, a in assets.items():
+        if aid != "v1":  # v1 is original user source input
+            fp = Path(a.get("filepath", ""))
+            if fp.exists():
+                prom = await promote_ai_deliverable(task_ctx.user_id, task_ctx.task_id, fp)
+                promoted.append(prom)
+
+    # If assets didn't have secondary deliverables, check ai_workplace_dir
+    if not promoted and getattr(task_ctx, "ai_workplace_dir", None) and task_ctx.ai_workplace_dir.exists():
+        for p in task_ctx.ai_workplace_dir.iterdir():
+            if p.is_file() and not p.name.startswith("."):
+                prom = await promote_ai_deliverable(task_ctx.user_id, task_ctx.task_id, p)
+                promoted.append(prom)
+
+    return promoted
+
+
+async def handle_ai_promote(event, task_id: str, client) -> None:
+    """Callback handler for user approval saving AI deliverable to downloads."""
+    from bot.callbacks import get_or_restore_task_ctx
+    task_ctx = await get_or_restore_task_ctx(task_id, event)
+    if not task_ctx:
+        await event.answer("Session expired or file was deleted.", alert=True)
+        return
+
+    try:
+        promoted = await promote_all_session_deliverables(task_ctx)
+        if promoted:
+            file_names = ", ".join(f"`{p.name}`" for p in promoted)
+            await event.answer(
+                f"Saved to Downloads: {file_names}!\nYou can access or recall them anytime via /files.",
+                alert=True
+            )
+        else:
+            await event.answer("No new output deliverables found to promote.", alert=True)
+    except Exception as e:
+        logger.error(f"Error promoting AI deliverables: {e}", exc_info=True)
+        await event.answer(f"Failed to promote deliverables: {e}", alert=True)
+

@@ -8,7 +8,6 @@ from .models import (
     get_file_cache,
     mark_input_file_deleted,
     mark_output_file_deleted,
-    mark_file_cache_deleted,
     get_user_stats,
     get_user_recent_tasks
 )
@@ -24,7 +23,6 @@ __all__ = [
     "get_file_cache",
     "mark_input_file_deleted",
     "mark_output_file_deleted",
-    "mark_file_cache_deleted",
     "get_user_stats",
     "get_user_recent_tasks"
 ]

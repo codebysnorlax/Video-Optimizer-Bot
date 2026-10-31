@@ -86,13 +86,19 @@ async def record_task_failed(task_id: str, elapsed_time: float) -> None:
         await db.commit()
 
 
-async def register_file_cache(task_id: str, user_id: int, input_path: str, output_path: str) -> None:
+async def register_file_cache(
+    task_id: str,
+    user_id: int,
+    input_path: str,
+    output_path: str,
+    storage_type: str = "converted"
+) -> None:
     """Registers input and output file paths on server for storage tracking."""
     async with aiosqlite.connect(settings.DB_PATH) as db:
         await db.execute("""
-            INSERT OR REPLACE INTO file_cache (task_id, user_id, input_path, output_path, input_deleted, output_deleted, deleted)
-            VALUES (?, ?, ?, ?, 0, 0, 0)
-        """, (task_id, user_id, input_path, output_path))
+            INSERT OR REPLACE INTO file_cache (task_id, user_id, input_path, output_path, input_deleted, output_deleted, deleted, storage_type)
+            VALUES (?, ?, ?, ?, 0, 0, 0, ?)
+        """, (task_id, user_id, input_path, output_path, storage_type))
         await db.commit()
 
 
@@ -120,12 +126,6 @@ async def mark_output_file_deleted(task_id: str) -> None:
         await db.execute("UPDATE file_cache SET output_deleted = 1, deleted = 1 WHERE task_id = ?", (task_id,))
         await db.commit()
 
-
-async def mark_file_cache_deleted(task_id: str) -> None:
-    """Marks both file cache entries as deleted."""
-    async with aiosqlite.connect(settings.DB_PATH) as db:
-        await db.execute("UPDATE file_cache SET input_deleted = 1, output_deleted = 1, deleted = 1 WHERE task_id = ?", (task_id,))
-        await db.commit()
 
 
 async def get_user_stats(user_id: int) -> Dict[str, Any]:
@@ -199,9 +199,12 @@ async def get_user_cached_files(user_id: int) -> List[Dict[str, Any]]:
                 if data.get("output_deleted", 0) == 0 and out_path and os.path.exists(out_path):
                     if out_path not in seen_paths:
                         seen_paths.add(out_path)
+                        storage_type = data.get("storage_type", "converted")
+                        file_type_label = "download" if storage_type == "download" else "processed"
                         items.append({
                             "task_id": task_id,
-                            "file_type": "processed",
+                            "file_type": file_type_label,
+                            "storage_type": storage_type,
                             "path": out_path,
                             "name": Path(out_path).name,
                             "size": os.path.getsize(out_path),

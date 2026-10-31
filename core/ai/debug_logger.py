@@ -1,7 +1,7 @@
 """
 AI Session Debugger & Diagnostic Logger
-Persists complete conversation turns, media before/after ffprobe comparisons,
-and FFmpeg execution commands in storage/debug-ai for bug tracking and quality analysis.
+Routes all AI agent prompt, tool, and diagnostic traces to logs/ai/ai.log.
+storage/debug-ai is retired in favor of the centralized structured logging hierarchy.
 """
 
 import json
@@ -13,7 +13,7 @@ from typing import Dict, Any, List, Optional
 from core.probe import MediaMetadata, format_bytes, format_duration
 from config.settings import settings
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("ai")
 
 
 def serialize_media_metadata(meta: Optional[MediaMetadata]) -> Optional[Dict[str, Any]]:
@@ -89,24 +89,25 @@ def compute_media_comparison(before_meta: Optional[MediaMetadata], deliverable: 
 
 
 class AIDebugLogger:
-    """Manages recording of AI diagnostic and conversational sessions to disk."""
+    """
+    Manages recording of AI diagnostic and conversational sessions.
+    All traces route into logs/ai/ai.log.
+    """
 
-    def __init__(self, debug_dir: Optional[Path] = None):
-        self.debug_dir = debug_dir or getattr(settings, "AI_DEBUG_DIR", settings.BASE_DIR / "storage/debug-ai")
-        self._ensure_root_dir()
+    def __init__(self, log_path: Optional[Path] = None):
+        if log_path:
+            p = Path(log_path)
+            self.log_file = p if p.suffix == ".log" else (p / "ai.log")
+        else:
+            self.log_file = settings.AI_LOG_DIR / "ai.log"
+        self._ensure_log_dir()
 
-    def _ensure_root_dir(self) -> None:
-        """Ensures the root debug directory exists."""
+    def _ensure_log_dir(self) -> None:
+        """Ensures the parent log directory exists."""
         try:
-            self.debug_dir.mkdir(parents=True, exist_ok=True)
+            self.log_file.parent.mkdir(parents=True, exist_ok=True)
         except Exception as e:
-            logger.warning(f"Could not create debug root dir {self.debug_dir}: {e}")
-
-    def get_session_dir(self, user_id: int, task_id: str) -> Path:
-        """Returns the isolated debug directory for a specific session."""
-        session_dir = self.debug_dir / f"{user_id}_{task_id}"
-        session_dir.mkdir(parents=True, exist_ok=True)
-        return session_dir
+            logger.warning(f"Could not create AI log directory for {self.log_file}: {e}")
 
     def log_turn(
         self,
@@ -127,11 +128,11 @@ class AIDebugLogger:
         elapsed_seconds: float
     ) -> Optional[Path]:
         """
-        Records a complete turn of AI interaction into JSON and Markdown logs.
+        Records a complete turn of AI interaction into logs/ai/ai.log.
         Never raises exceptions to prevent interrupting the main bot workflow.
         """
         try:
-            session_dir = self.get_session_dir(user_id, task_id)
+            self._ensure_log_dir()
             now_iso = datetime.now(timezone.utc).isoformat()
             now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -185,194 +186,37 @@ class AIDebugLogger:
                 "final_reply": final_reply
             }
 
-            # 1. Save detailed JSON turn file
-            json_file = session_dir / f"turn_{turn_index:03d}.json"
-            with open(json_file, "w", encoding="utf-8") as f:
-                json.dump(turn_data, f, indent=2, default=str)
+            status_str = primary_result.get("status", "none") if primary_result else "none"
+            commands_str = ", ".join(executed_commands) if executed_commands else "none"
 
-            # 2. Append/update human-readable session_log.md
-            md_file = session_dir / "session_log.md"
-            self._append_markdown_log(
-                md_file=md_file,
-                turn_index=turn_index,
-                now_str=now_str,
-                user_id=user_id,
-                task_id=task_id,
-                model=model,
-                user_input=user_input,
-                before_serialized=before_serialized,
-                assets_serialized=assets_serialized,
-                tool_calls=tool_calls,
-                executed_commands=executed_commands,
-                deliverables=deliverables,
-                comparison=comparison,
-                final_reply=final_reply,
-                elapsed_seconds=elapsed_seconds,
-                primary_result=primary_result
+            log_entry = (
+                f"[{now_str}] [AI_TURN] Turn {turn_index} | User: {user_id} | Task: {task_id} | "
+                f"Model: {model} | Elapsed: {elapsed_seconds:.2f}s | Status: {status_str} | "
+                f"Commands: {commands_str}\n"
+                f"  Input: {user_input}\n"
+                f"  Reply: {final_reply.strip() if final_reply else 'None'}\n"
+                f"  Trace: {json.dumps(turn_data, default=str)}\n"
             )
 
-            # 3. Append to global sessions.jsonl index
-            self._append_global_index(
-                now_iso=now_iso,
-                user_id=user_id,
-                task_id=task_id,
-                turn_index=turn_index,
-                user_input=user_input,
-                model=model,
-                primary_result=primary_result,
-                comparison=comparison,
-                elapsed_seconds=elapsed_seconds
+            with open(self.log_file, "a", encoding="utf-8") as f:
+                f.write(log_entry)
+
+            logger.info(
+                f"AI Turn {turn_index} [User: {user_id}, Task: {task_id}] "
+                f"Input: \"{user_input}\" -> Status: {status_str} ({elapsed_seconds:.2f}s)"
             )
 
-            return json_file
+            return self.log_file
 
         except Exception as e:
             logger.warning(f"AIDebugLogger error during log_turn: {e}", exc_info=True)
             return None
 
-    def _append_markdown_log(
-        self,
-        md_file: Path,
-        turn_index: int,
-        now_str: str,
-        user_id: int,
-        task_id: str,
-        model: str,
-        user_input: str,
-        before_serialized: Optional[Dict[str, Any]],
-        assets_serialized: Dict[str, Any],
-        tool_calls: Optional[List[Dict[str, Any]]],
-        executed_commands: List[str],
-        deliverables: List[Dict[str, Any]],
-        comparison: Dict[str, Any],
-        final_reply: str,
-        elapsed_seconds: float,
-        primary_result: Optional[Dict[str, Any]]
-    ) -> None:
-        """Appends a clear, structured markdown summary for human inspection."""
-        is_new_file = not md_file.exists() or md_file.stat().st_size == 0
-        lines = []
-
-        if is_new_file:
-            init_file = before_serialized.get("filename", "Unknown") if before_serialized else "None"
-            lines.append(f"# AI Diagnostic Session: {user_id}_{task_id}\n")
-            lines.append(f"- **Session Initialized:** {now_str}")
-            lines.append(f"- **Initial Source File:** `{init_file}`")
-            lines.append(f"- **Initial Model:** `{model}`\n")
-            lines.append("---\n")
-
-        lines.append(f"## Turn {turn_index} ({now_str})\n")
-        lines.append(f"- **User Input:** \"{user_input}\"")
-        lines.append(f"- **Active Model:** `{model}` (Turn duration: {elapsed_seconds:.2f}s)\n")
-
-        # Media Before
-        lines.append("### 1. Media Before:")
-        if before_serialized:
-            lines.append(
-                f"- **Target File:** `{before_serialized.get('filename')}` | "
-                f"**Resolution:** `{before_serialized.get('resolution')}` | "
-                f"**Size:** `{before_serialized.get('formatted_size')}` | "
-                f"**Duration:** `{before_serialized.get('formatted_duration')}`"
-            )
-            lines.append(
-                f"- **Codecs:** Video: `{before_serialized.get('video_codec') or 'None'}` (~{before_serialized.get('video_bitrate_kbps') or 'N/A'} kbps) | "
-                f"Audio: `{before_serialized.get('audio_codec') or 'None'}` (~{before_serialized.get('audio_bitrate_kbps') or 'N/A'} kbps)"
-            )
-        else:
-            lines.append("- *No primary media metadata available.*")
-
-        if assets_serialized:
-            asset_items = [f"`[{aid}]` {a.get('filename')} ({a.get('media_type')})" for aid, a in assets_serialized.items()]
-            lines.append(f"- **Session Assets:** {', '.join(asset_items)}")
-        lines.append("")
-
-        # AI Decision & Tool Calls
-        lines.append("### 2. AI Decision & Tool Execution:")
-        if tool_calls:
-            for tc in tool_calls:
-                fn = tc.get("function", {})
-                name = fn.get("name", "unknown")
-                args = fn.get("arguments", "{}")
-                lines.append(f"- **Tool Called:** `{name}`")
-                lines.append(f"- **Arguments:**\n```json\n{args}\n```")
-        else:
-            lines.append("- **Tool Called:** None (Direct conversational answer)")
-
-        if executed_commands:
-            lines.append("- **FFmpeg Command(s) Executed:**")
-            for c in executed_commands:
-                lines.append(f"```bash\n{c}\n```")
-
-        status_str = primary_result.get("status", "none") if primary_result else "none"
-        lines.append(f"- **Execution Status:** `{status_str}`\n")
-
-        # Media After
-        lines.append("### 3. Media After (FFprobe Verified):")
-        if deliverables:
-            for idx, d in enumerate(deliverables, start=1):
-                fprobe = d.get("ffprobe") or {}
-                res = fprobe.get("resolution") or d.get("resolution", "Unknown")
-                sz = fprobe.get("formatted_size") or d.get("formatted_size", "Unknown")
-                dur = fprobe.get("formatted_duration") or d.get("duration", "Unknown")
-                vcodec = fprobe.get("video_codec") or "None"
-                acodec = fprobe.get("audio_codec") or "None"
-                lines.append(f"- **Deliverable {idx}:** `{d.get('filename')}` | `{res}` | `{sz}` | `{dur}`")
-                lines.append(f"  - **Codecs:** Video: `{vcodec}` | Audio: `{acodec}`")
-
-            if comparison:
-                lines.append(
-                    f"- **Delta:** Size `{comparison.get('size_before')}` -> `{comparison.get('size_after')}` "
-                    f"({comparison.get('size_reduction_percent', 0)}% change) | "
-                    f"Resolution: `{comparison.get('resolution_before')}` -> `{comparison.get('resolution_after')}`"
-                )
-        else:
-            lines.append("- *No output deliverables generated in this turn.*")
-        lines.append("")
-
-        # AI Response
-        lines.append("### 4. AI Response to User:")
-        lines.append(f"> {final_reply.strip()}\n")
-        lines.append("---\n")
-
-        with open(md_file, "a", encoding="utf-8") as f:
-            f.write("\n".join(lines))
-
-    def _append_global_index(
-        self,
-        now_iso: str,
-        user_id: int,
-        task_id: str,
-        turn_index: int,
-        user_input: str,
-        model: str,
-        primary_result: Optional[Dict[str, Any]],
-        comparison: Dict[str, Any],
-        elapsed_seconds: float
-    ) -> None:
-        """Appends an index entry to sessions.jsonl in the root debug directory."""
-        index_file = self.debug_dir / "sessions.jsonl"
-        summary = {
-            "timestamp": now_iso,
-            "user_id": user_id,
-            "task_id": task_id,
-            "turn": turn_index,
-            "user_input": user_input[:100],
-            "model": model,
-            "status": primary_result.get("status") if primary_result else "none",
-            "plan_title": primary_result.get("plan_title") if primary_result else None,
-            "size_before": comparison.get("size_before"),
-            "size_after": comparison.get("size_after"),
-            "reduction_percent": comparison.get("size_reduction_percent"),
-            "elapsed_seconds": round(elapsed_seconds, 2)
-        }
-        with open(index_file, "a", encoding="utf-8") as f:
-            f.write(json.dumps(summary, default=str) + "\n")
-
     def log_session_event(self, user_id: int, task_id: str, event_type: str, details: Dict[str, Any]) -> None:
-        """Logs arbitrary session lifecycle events (e.g. asset uploaded, session exited)."""
+        """Logs arbitrary session lifecycle events into logs/ai/ai.log."""
         try:
-            session_dir = self.get_session_dir(user_id, task_id)
-            event_file = session_dir / "events.jsonl"
+            self._ensure_log_dir()
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             record = {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "event_type": event_type,
@@ -380,8 +224,14 @@ class AIDebugLogger:
                 "task_id": task_id,
                 **details
             }
-            with open(event_file, "a", encoding="utf-8") as f:
-                f.write(json.dumps(record, default=str) + "\n")
+            log_entry = (
+                f"[{now_str}] [AI_EVENT] {event_type} | User: {user_id} | Task: {task_id} | "
+                f"Details: {json.dumps(record, default=str)}\n"
+            )
+            with open(self.log_file, "a", encoding="utf-8") as f:
+                f.write(log_entry)
+
+            logger.info(f"AI Event {event_type} [User: {user_id}, Task: {task_id}]: {details}")
         except Exception as e:
             logger.warning(f"Could not record session event {event_type}: {e}")
 

@@ -117,6 +117,22 @@ async def test_openrouter_client_fallback_cascade():
 
 
 @pytest.mark.asyncio
+async def test_openrouter_daily_free_limit_detection():
+    """Verifies that OpenRouter daily free tier exhaustion terminates cascade early with clear message."""
+    client = OpenRouterClient(api_key="mock_key", default_model="primary/model:free")
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 429
+    mock_resp.text = json.dumps({"error": {"message": "Rate limit exceeded: free-models-per-day. Add 10 credits to unlock 1000 free model requests per day"}})
+
+    with patch("httpx.AsyncClient.post", AsyncMock(return_value=mock_resp)):
+        with pytest.raises(RuntimeError) as exc_info:
+            await client.chat_completion(messages=[{"role": "user", "content": "test"}])
+        assert "daily limit reached" in str(exc_info.value)
+
+
+
+@pytest.mark.asyncio
 async def test_ai_agent_diagnostic_turn(sample_metadata, tmp_path):
     """Verifies that diagnostic user query triggers diagnose_video tool and formats diagnosis."""
     dummy_input = tmp_path / "test.mp4"
@@ -1236,13 +1252,13 @@ async def test_deliver_ai_results_conversational_chat_reply_and_finally_safety(t
 
 
 def test_ai_debug_logger_turn_logging(tmp_path):
-    """Verifies that AIDebugLogger properly records turn JSON, Markdown log, and global index."""
+    """Verifies that AIDebugLogger routes turn traces to ai.log and retires storage/debug-ai."""
     import json
     from core.ai.debug_logger import AIDebugLogger
     from core.probe import MediaMetadata
 
-    debug_root = tmp_path / "debug-ai"
-    logger = AIDebugLogger(debug_root)
+    log_root = tmp_path / "logs" / "ai"
+    logger = AIDebugLogger(log_root)
 
     in_f = tmp_path / "src.mp4"
     in_f.write_bytes(b"data")
@@ -1312,43 +1328,28 @@ def test_ai_debug_logger_turn_logging(tmp_path):
 
     assert turn_file is not None
     assert turn_file.exists()
+    assert turn_file.name == "ai.log"
 
-    # 1. Verify JSON file
-    with open(turn_file, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    assert data["user_id"] == 12345
-    assert data["task_id"] == "abcde"
-    assert data["turn_index"] == 1
-    assert data["user_input"] == "make my video black and white"
-    assert data["media_before"]["primary"]["video_codec"] == "hevc"
-    assert data["execution"]["status"] == "success"
-    assert "ffmpeg -i src.mp4" in data["execution"]["executed_commands"][0]
-    assert data["media_after"]["comparison"]["size_reduction_percent"] == 50.0
+    # Verify ai.log contents
+    log_content = turn_file.read_text(encoding="utf-8")
+    assert "AI_TURN" in log_content
+    assert "make my video black and white" in log_content
+    assert "ffmpeg -i src.mp4" in log_content
+    assert "12345" in log_content
+    assert "abcde" in log_content
+    assert "Black and White" in log_content
 
-    # 2. Verify session_log.md
-    session_dir = debug_root / "12345_abcde"
-    md_file = session_dir / "session_log.md"
-    assert md_file.exists()
-    md_content = md_file.read_text(encoding="utf-8")
-    assert "AI Diagnostic Session: 12345_abcde" in md_content
-    assert "make my video black and white" in md_content
-    assert "ffmpeg -i src.mp4" in md_content
-    assert "50.0% change" in md_content
-
-    # 3. Verify sessions.jsonl
-    idx_file = debug_root / "sessions.jsonl"
-    assert idx_file.exists()
-    idx_content = idx_file.read_text(encoding="utf-8")
-    assert "12345" in idx_content
-    assert "abcde" in idx_content
+    # Verify storage/debug-ai is retired and no session folders created there
+    legacy_debug_dir = tmp_path / "storage" / "debug-ai"
+    assert not legacy_debug_dir.exists()
 
 
 def test_ai_debug_logger_event_logging(tmp_path):
-    """Verifies that AIDebugLogger properly records session events."""
+    """Verifies that AIDebugLogger properly records session events to ai.log."""
     from core.ai.debug_logger import AIDebugLogger
 
-    debug_root = tmp_path / "debug-ai"
-    logger = AIDebugLogger(debug_root)
+    log_root = tmp_path / "logs" / "ai"
+    logger = AIDebugLogger(log_root)
 
     logger.log_session_event(
         user_id=888,
@@ -1357,11 +1358,13 @@ def test_ai_debug_logger_event_logging(tmp_path):
         details={"filename": "sound.mp3", "media_type": "audio"}
     )
 
-    event_file = debug_root / "888_task_event" / "events.jsonl"
-    assert event_file.exists()
-    content = event_file.read_text(encoding="utf-8")
+    log_file = log_root / "ai.log"
+    assert log_file.exists()
+    content = log_file.read_text(encoding="utf-8")
+    assert "AI_EVENT" in content
     assert "asset_uploaded" in content
     assert "sound.mp3" in content
+    assert "888" in content
 
 def test_get_latest_task_for_user():
     """Verifies that task_manager can find the most recent task for a user regardless of AI session active flag."""
@@ -1564,7 +1567,7 @@ async def test_tiered_history_strategy_in_run_turn(sample_metadata, tmp_path):
         agent.history.append({"role": "user", "content": f"Turn {i} with asset [v1] goal: transcode {i}"})
         agent.history.append({"role": "assistant", "content": f"Turn {i} completed."})
 
-    res = await agent.run_turn("Now do one more thing")
+    res = await agent.process_message("Now do one more thing")
 
     assert res["status"] == "success"
     mock_client.chat_completion.assert_called_once()
@@ -1637,7 +1640,7 @@ def test_followup_timeout_is_30s():
     """Task 6.1: Follow-up chat completion wait_for timeout is set to 30.0s."""
     import inspect
     from core.ai.agent import VideoAIAgent
-    src = inspect.getsource(VideoAIAgent.run_turn)
+    src = inspect.getsource(VideoAIAgent.process_message)
     assert "timeout=30.0" in src
 
 

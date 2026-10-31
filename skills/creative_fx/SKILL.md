@@ -89,7 +89,8 @@ ffmpeg -i "$INPUT" -filter_complex "[0:v]setpts=2.0*PTS[v];[0:a]atempo=0.5[a]" -
 ## 4. Color, Grayscale & Aesthetic Filters
 
 ### A. Black and White / Grayscale (Desaturate)
-Converts video to clean monochromatic black and white while preserving crisp audio:
+Converts video to clean monochromatic black and white while preserving crisp audio.
+Always use video filter `vf_filter='hue=s=0'`, keep `video_codec='libx264'`, `crf=22`, and preserve audio with `audio_codec='aac'`! NEVER set `-frames:v 1`, `-ss`, or create single image files (like `.jpg.mp4`)!
 ```bash
 ffmpeg -i "$INPUT" -vf "hue=s=0" -c:v libx264 -crf 22 -preset fast -c:a copy -movflags +faststart "$OUTPUT"
 ```
@@ -108,6 +109,30 @@ ffmpeg -i "$INPUT" -vf "hue=s=1.5" -c:v libx264 -crf 22 -preset fast -c:a copy -
 ### D. Enhance Brightness & Contrast
 ```bash
 ffmpeg -i "$INPUT" -vf "eq=brightness=0.06:contrast=1.15" -c:v libx264 -crf 22 -preset fast -c:a copy -movflags +faststart "$OUTPUT"
+```
+
+### E. Negative / Invert
+```bash
+ffmpeg -i "$INPUT" -vf "negate" -c:v libx264 -crf 22 -preset fast -c:a copy -movflags +faststart "$OUTPUT"
+```
+
+### F. Sharpness
+```bash
+ffmpeg -i "$INPUT" -vf "unsharp=5:5:1.0:5:5:0.0" -c:v libx264 -crf 22 -preset fast -c:a copy -movflags +faststart "$OUTPUT"
+```
+
+### G. Blur
+```bash
+ffmpeg -i "$INPUT" -vf "boxblur=5:2" -c:v libx264 -crf 22 -preset fast -c:a copy -movflags +faststart "$OUTPUT"
+```
+
+### H. Audio Looping & Duration Matching (`aloop`)
+When asked to loop or repeat audio to match video duration:
+- FFmpeg does NOT have an `arepeat` filter! Always use `aloop=loop=-1:size=2e+09`.
+- Always pair with `-shortest` or `-t <duration>` in extra_args to prevent infinite rendering.
+- Always use `audio_codec='aac'` (filters cannot be applied with `copy`).
+```bash
+ffmpeg -i "$INPUT" -i "$AUDIO" -map 0:v:0 -map 1:a:0 -af "aloop=loop=-1:size=2e+09" -c:v copy -c:a aac -shortest -movflags +faststart "$OUTPUT"
 ```
 
 ---

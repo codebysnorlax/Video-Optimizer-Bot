@@ -22,14 +22,13 @@ DEFAULT_FREE_MODELS = [
     "nvidia/nemotron-3.5-super-vl:free",
     "google/gemma-4-31b-it:free",
     "google/gemma-4-26b-a4b-it:free",
-    "nvidia/nemotron-3-super-120b-a12b:free",
     "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
-    "thinkingmachines/inkling:free",
-    "cohere/north-mini-code:free",
+    "nvidia/nemotron-3-ultra-550b-a55b:free",
     "liquid/lfm-2.5-2.6b:free",
     "recursive/flint-v1.0:free",
-    "meta-llama/llama-3.3-70b-instruct:free",
-    "qwen/qwen-2.5-coder-32b-instruct:free"
+    "cohere/north-mini-code:free",
+    "xingchen-agi/xing4.0-29b-a4b:free",
+    "dots-studio/dots-3-note-preview:free"
 ]
 
 # In-memory cache for live free models
@@ -78,9 +77,14 @@ async def fetch_openrouter_free_models(force_refresh: bool = False) -> List[Dict
                     if not is_free:
                         continue
 
-                    # Filter out embedding, rerank, and moderation models
+                    # Filter out non-text generation, embedding, rerank, moderation, and restricted models
                     mid_lower = mid.lower()
-                    if any(bad in mid_lower for bad in ("embed", "rerank", "moderation", "guard", "whisper", "safety")):
+                    if any(bad in mid_lower for bad in ("embed", "rerank", "moderation", "guard", "whisper", "safety", "inkling", "lyria")):
+                        continue
+
+                    arch = item.get("architecture", {})
+                    out_mods = arch.get("output_modalities") or []
+                    if out_mods and out_mods != ["text"]:
                         continue
 
                     # Clean model name
@@ -194,10 +198,19 @@ class OpenRouterClient:
                             return choices[0].get("message", {})
                         logger.warning(f"OpenRouter model {model_name} returned 200 with empty choices: {data}")
 
-                    # If rate limited (429) or service unavailable (502, 503, 404), try next model in cascade
-                    if response.status_code in (429, 502, 503, 404):
-                        logger.warning(f"OpenRouter model {model_name} failed with status {response.status_code}: {response.text}. Trying fallback model...")
-                        last_error = f"HTTP {response.status_code}: {response.text}"
+                    resp_text = response.text
+                    # Detect global daily account limit on free models to avoid fruitless cascading
+                    if response.status_code == 429 and ("free-models-per-day" in resp_text or "openrouter_free_tier_daily" in resp_text):
+                        logger.error(f"OpenRouter free tier daily rate limit reached: {resp_text}")
+                        raise RuntimeError(
+                            "OpenRouter free tier daily limit reached (50 free requests/day). "
+                            "Please wait for the daily quota reset or add credits at https://openrouter.ai to unlock 1,000 free requests/day."
+                        )
+
+                    # If rate limited (429), unavailable (502, 503), deprecated (404), or restricted (403), try next model
+                    if response.status_code in (429, 502, 503, 404, 403):
+                        logger.warning(f"OpenRouter model {model_name} failed with status {response.status_code}: {resp_text}. Trying fallback model...")
+                        last_error = f"HTTP {response.status_code}: {resp_text}"
                         continue
                     else:
                         response.raise_for_status()

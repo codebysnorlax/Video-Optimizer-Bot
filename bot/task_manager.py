@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Dict, Optional, List, Set, Any
 from contextlib import asynccontextmanager
 from core.probe import MediaMetadata
+from core.hardware import current_hardware
 from config.settings import settings
 
 logger = logging.getLogger(__name__)
@@ -112,13 +113,21 @@ class TaskManager:
     """Manages active tasks, recall operations, and media processing queue concurrency."""
 
     def __init__(self, max_concurrent: int = 1):
-        self._max_concurrent = max(1, max_concurrent)
+        # Enforce 6-worker ceiling for Snapdragon / Termux mobile environments
+        if getattr(current_hardware, "is_termux", False) or "Snapdragon" in getattr(current_hardware, "description", ""):
+            self._max_concurrent = min(max(1, max_concurrent), 6)
+        else:
+            self._max_concurrent = max(1, max_concurrent)
         self._semaphore = asyncio.Semaphore(self._max_concurrent)
         self._active_tasks: Dict[str, TaskContext] = {}
         self._active_recalls: Dict[str, RecallContext] = {}
         self._active_encoders: Set[str] = set()
         self._wait_queue: List[QueuedEncodingTask] = []
         self._queue_lock = asyncio.Lock()
+
+    @property
+    def max_concurrent(self) -> int:
+        return self._max_concurrent
 
     def register_task(self, context: TaskContext) -> None:
         self._active_tasks[context.task_id] = context

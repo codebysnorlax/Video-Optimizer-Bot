@@ -57,8 +57,6 @@ class VideoOptimizer:
                 return f"scale=-2:{max_dim}"
         return None
 
-    get_optimal_scale_filter = get_scale_filter
-
     @staticmethod
     def get_fps_filter(meta: MediaMetadata, max_fps: float = 60.0) -> Optional[str]:
         """
@@ -512,7 +510,3 @@ class VideoOptimizer:
         cmd.extend(["-movflags", "+faststart", str(output_path)])
         summary_explanation = " • " + "\n • ".join(explanation)
         return cmd, summary_explanation
-
-    # Aliases for clarity and user-facing terminology
-    build_720p_args = build_low_device_args
-    build_1080p_args = build_moderate_args

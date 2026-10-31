@@ -479,22 +479,22 @@ def test_720p_and_1080p_bitrate_modes():
         raw_info={}
     )
 
-    # 720p same on 720p compliant video: stream copy
-    cmd_720_same, _ = VideoOptimizer.build_720p_args(meta_720p, out_file, bitrate_mode="same")
+    # 720p / low device same on 720p compliant video: stream copy
+    cmd_720_same, _ = VideoOptimizer.build_low_device_args(meta_720p, out_file, bitrate_mode="same")
     assert "copy" in cmd_720_same
 
-    # 720p less on 720p video: re-encode to compress bitrate
-    cmd_720_less, exp_720_less = VideoOptimizer.build_720p_args(meta_720p, out_file, bitrate_mode="less")
+    # 720p / low device less on 720p video: re-encode to compress bitrate
+    cmd_720_less, exp_720_less = VideoOptimizer.build_low_device_args(meta_720p, out_file, bitrate_mode="less")
     assert "copy" not in cmd_720_less
     assert "Compressed stream bitrate" in exp_720_less
 
-    # 1080p same on 720p video: stream copy (already <= 1080p)
-    cmd_1080_same, _ = VideoOptimizer.build_1080p_args(meta_720p, out_file, bitrate_mode="same")
+    # 1080p / moderate same on 720p video: stream copy (already <= 1080p)
+    cmd_1080_same, _ = VideoOptimizer.build_moderate_args(meta_720p, out_file, bitrate_mode="same")
     assert "copy" in cmd_1080_same
 
 
-def test_get_optimal_scale_filter_alias():
-    """Verifies that get_optimal_scale_filter works identically to get_scale_filter."""
+def test_scale_filter_and_alias_removal():
+    """Verifies that get_scale_filter works correctly and deprecated aliases are removed."""
     meta_4k_portrait = MediaMetadata(
         file_path=Path("/tmp/4k.mp4"),
         file_name="4k.mp4",
@@ -516,8 +516,11 @@ def test_get_optimal_scale_filter_alias():
         is_high_bitrate=False,
         raw_info={}
     )
-    assert VideoOptimizer.get_optimal_scale_filter(meta_4k_portrait, 1080) == "scale=1080:-2"
     assert VideoOptimizer.get_scale_filter(meta_4k_portrait, 1080) == "scale=1080:-2"
+    # Ensure legacy aliases are purged
+    assert not hasattr(VideoOptimizer, "get_optimal_scale_filter")
+    assert not hasattr(VideoOptimizer, "build_720p_args")
+    assert not hasattr(VideoOptimizer, "build_1080p_args")
 
 
 

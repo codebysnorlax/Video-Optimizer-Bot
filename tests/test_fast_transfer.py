@@ -141,3 +141,19 @@ async def test_fast_download_cancellation_propagation(tmp_path):
             location_or_message=MagicMock(),
             out_path=out_file
         )
+
+
+def test_create_bot_client_crypto_startup_verification(caplog):
+    """Verifies that create_bot_client verifies and logs MTProto crypto acceleration during startup."""
+    import logging
+    from unittest.mock import patch, MagicMock
+
+    with patch("bot.client.TelegramClient") as mock_telethon:
+        with caplog.at_level(logging.INFO):
+            from bot.client import create_bot_client
+            client = create_bot_client()
+
+            assert client is not None
+            # Verify crypto acceleration log message was emitted
+            assert any("MTProto cryptographic acceleration active" in rec.message or "MTProto cryptography unaccelerated" in rec.message for rec in caplog.records)
+

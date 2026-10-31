@@ -31,7 +31,6 @@ from database.models import (
     get_file_cache,
     mark_input_file_deleted,
     mark_output_file_deleted,
-    mark_file_cache_deleted,
     get_user_cached_files,
     get_single_cached_file,
     get_user_stats
@@ -283,6 +282,12 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
             task_ctx.ai_agent = await restore_ai_session(task_ctx, client)
         from bot.ai_handler import handle_ai_session_start
         await handle_ai_session_start(event, task_ctx, client)
+        return
+
+    if action_type == "ai_promote":
+        task_id = parts[1]
+        from bot.ai_handler import handle_ai_promote
+        await handle_ai_promote(event, task_id, client)
         return
 
     if action_type == "ai_exit":
@@ -801,7 +806,7 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
             return
 
         disk = settings.get_disk_usage()
-        type_label = "Original Source Video" if file_type == "original" else "Processed / Optimized Output"
+        type_label = "Original Source Video" if file_type == "original" else ("Promoted AI Download" if file_type == "download" else "Processed / Optimized Output")
         text = (
             "**File Details:**\n\n"
             f"• **Name:** `{file_info['name']}`\n"
@@ -1364,9 +1369,9 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
             bitrate_mode = "less" if mode.endswith("_less") else "same"
             explanation = ""
             if mode.startswith("720") or mode == "low":
-                cmd, explanation = VideoOptimizer.build_720p_args(meta, out_path, current_hardware, bitrate_mode=bitrate_mode)
+                cmd, explanation = VideoOptimizer.build_low_device_args(meta, out_path, current_hardware, bitrate_mode=bitrate_mode)
             elif mode.startswith("1080") or mode == "mod":
-                cmd, explanation = VideoOptimizer.build_1080p_args(meta, out_path, current_hardware, bitrate_mode=bitrate_mode)
+                cmd, explanation = VideoOptimizer.build_moderate_args(meta, out_path, current_hardware, bitrate_mode=bitrate_mode)
             elif mode == "auto_less":
                 cmd, explanation = VideoOptimizer.build_auto_recommended_args(meta, out_path, current_hardware, bitrate_mode="less")
             else:

@@ -689,4 +689,72 @@ async def test_upload_runs_outside_encoding_slot(tmp_path, monkeypatch):
     task_manager.remove_task("task_upload1")
 
 
+async def test_files_listing_includes_promoted_downloads(tmp_path: Path):
+    """Verifies that promoted downloads appear in /files listing alongside converted media."""
+    from config.settings import settings
+    from database.db import init_db
+    from database.models import register_file_cache, get_user_cached_files, get_single_cached_file
+    from bot.keyboards import build_files_list_menu
+
+    db_path = tmp_path / "test_files.db"
+    dl_dir = tmp_path / "downloads"
+    out_dir = tmp_path / "outputs"
+    dl_dir.mkdir()
+    out_dir.mkdir()
+
+    settings.DB_PATH = db_path
+    settings.DOWNLOAD_DIR = dl_dir
+    settings.OUTPUT_DIR = out_dir
+
+    await init_db()
+
+    # Create dummy files
+    conv_file = out_dir / "converted_video.mp4"
+    conv_file.write_bytes(b"CONVERTED_MEDIA_DATA")
+
+    promoted_file = dl_dir / "ai_deliverable.mp4"
+    promoted_file.write_bytes(b"PROMOTED_DOWNLOAD_DATA")
+
+    # Register converted file
+    await register_file_cache(
+        task_id="task_conv_1",
+        user_id=777,
+        input_path="",
+        output_path=str(conv_file),
+        storage_type="converted"
+    )
+
+    # Register promoted download file
+    await register_file_cache(
+        task_id="task_promoted_2",
+        user_id=777,
+        input_path="",
+        output_path=str(promoted_file),
+        storage_type="download"
+    )
+
+    # Fetch user files
+    user_files = await get_user_cached_files(777)
+    assert len(user_files) == 2
+
+    types = {f["file_type"] for f in user_files}
+    assert "processed" in types
+    assert "download" in types
+
+    # Verify menu rendering
+    menu = build_files_list_menu(user_files, page=0, page_size=5)
+    labels = [btn.text for row in menu for btn in row if hasattr(btn, "text")]
+    assert any("[Opt]" in label for label in labels)
+    assert any("[DL]" in label for label in labels)
+
+    callbacks = [btn.type.data for row in menu for btn in row if hasattr(btn, "type")]
+    assert any(b"fview:download:task_promoted_2" in cb for cb in callbacks)
+
+    # Verify retrieval
+    item = await get_single_cached_file(777, "task_promoted_2", "download")
+    assert item is not None
+    assert item["name"] == "ai_deliverable.mp4"
+    assert item["path"] == str(promoted_file)
+
+
 
